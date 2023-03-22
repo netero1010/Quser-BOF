@@ -3,6 +3,7 @@
 #include "beacon.h"
 
 DECLSPEC_IMPORT WINBASEAPI DWORD WINAPI KERNEL32$GetLastError (void);
+DECLSPEC_IMPORT WINBASEAPI BOOL WINAPI KERNEL32$FileTimeToSystemTime (const FILETIME*, LPSYSTEMTIME);
 DECLSPEC_IMPORT WINBASEAPI HANDLE WINAPI WTSAPI32$WTSOpenServerA (LPSTR);
 DECLSPEC_IMPORT WINBASEAPI BOOL WINAPI WTSAPI32$WTSEnumerateSessionsA (HANDLE, DWORD, DWORD, PWTS_SESSION_INFOA *, DWORD *);
 DECLSPEC_IMPORT WINBASEAPI BOOL WINAPI WTSAPI32$WTSQuerySessionInformationA (HANDLE, DWORD, WTS_INFO_CLASS, LPSTR *, DWORD *);
@@ -20,8 +21,9 @@ void go(char * args, int alen)
 	char *addrFamily = "";
 	char *stateInfo = "";
 	HANDLE hTarget = NULL;
-	LPTSTR userName, userDomain, clientName, clientAddress;
+	LPTSTR userName, userDomain, clientName, clientAddress, wtsinfo;
 	PWTS_CLIENT_ADDRESS clientAddressStruct = NULL;
+	PWTSINFO wtsinfoStruct = NULL;
 	BOOL successGetSession = 0;
 	hTarget = WTSAPI32$WTSOpenServerA(targetHost);
 	successGetSession = WTSAPI32$WTSEnumerateSessionsA(hTarget, 0, 1, &pwsi, &dwCount);
@@ -31,7 +33,7 @@ void go(char * args, int alen)
 		else
 			BeaconPrintf(CALLBACK_OUTPUT, "ERROR %d: Could not connect to %s.", KERNEL32$GetLastError(), targetHost);
 	} else {
-		BeaconPrintf(CALLBACK_OUTPUT, "%-20s%-25s%-15s%-15s%-15s%-18s%s", "UserDomain", "UserName", "SessionName", "SessionID" , "State", "SourceAddress", "SourceClientName");
+		BeaconPrintf(CALLBACK_OUTPUT, "%-20s%-25s%-15s%-15s%-15s%-18s%-20s%s", "UserDomain", "UserName", "SessionName", "SessionID" , "State", "SourceAddress", "SourceClientName", "IdleTime");
 		for (unsigned int i = 0; i < dwCount; i++)
 		{
 			WTS_SESSION_INFO si = pwsi[i];
@@ -67,6 +69,26 @@ void go(char * args, int alen)
 				addrFamily = "NetBios";
 			else 
 				addrFamily = "Unknown";
+
+			LARGE_INTEGER idle;
+			SYSTEMTIME idleTime;
+			getResult = WTSAPI32$WTSQuerySessionInformationA(hTarget, si.SessionId, WTSSessionInfo, &wtsinfo, &bytesReturned);
+			if(!getResult){
+				BeaconPrintf(CALLBACK_ERROR, "ERROR %d on getting attribute using WTSQuerySessionInformationA", KERNEL32$GetLastError());
+			} else {
+				wtsinfoStruct = (PWTSINFO)wtsinfo;
+
+				idle = wtsinfoStruct->CurrentTime;
+				idle.QuadPart -= wtsinfoStruct->LastInputTime.QuadPart;
+
+				FILETIME LclFileTime = { idle.LowPart, idle.HighPart };
+				getResult = KERNEL32$FileTimeToSystemTime(&LclFileTime, &idleTime);
+				if(!getResult){
+					clientAddress = "N/A";
+					BeaconPrintf(CALLBACK_ERROR, "ERROR %d on converting time using FileTimeToSystemTime", KERNEL32$GetLastError());
+				}
+			}
+
 			if(strlen(userName)){
 				if(si.State == WTSActive)
 					stateInfo = "Active";
@@ -80,8 +102,10 @@ void go(char * args, int alen)
 					stateInfo = "Unknown";
 				if(addrFamily == "Unspecified")
 					BeaconPrintf(CALLBACK_OUTPUT, "%-20s%-25s%-15s%-15i%-15s%-18s%s", userDomain, userName, si.pWinStationName, si.SessionId, stateInfo, "-", "-");
-				else
+				else if(!getResult)
 					BeaconPrintf(CALLBACK_OUTPUT, "%-20s%-25s%-15s%-15i%-15s%u.%u.%u.%-6u%s", userDomain, userName, si.pWinStationName, si.SessionId, stateInfo, clientAddressStruct->Address[2], clientAddressStruct->Address[3], clientAddressStruct->Address[4], clientAddressStruct->Address[5], clientName);
+				else 
+					BeaconPrintf(CALLBACK_OUTPUT, "%-20s%-25s%-15s%-15i%-15s%u.%u.%u.%-10u%-20s%dh %dm %ds", userDomain, userName, si.pWinStationName, si.SessionId, stateInfo, clientAddressStruct->Address[2], clientAddressStruct->Address[3], clientAddressStruct->Address[4], clientAddressStruct->Address[5], clientName, idleTime.wHour, idleTime.wMinute, idleTime.wSecond);
 			}
 		}
 	}
